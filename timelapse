@@ -1,0 +1,216 @@
+#!/bin/bash
+
+
+BASE_DIR=~/.timelapse
+# Snapshot direcoty
+SCREENSHOT_DIR="$BASE_DIR"/screenshots
+# Image directory
+SCREENSHOT_I1="$BASE_DIR"/V1
+SCREENSHOT_I2="$BASE_DIR"/V2
+#video Directory
+SCREENSHOT_V1="$BASE_DIR"/I1
+SCREENSHOT_V2="$BASE_DIR"/I2
+VIDEO_COMPILED="$BASE_DIR"/compiled
+
+#MATH
+DELAY=.5
+FPS=15
+VIDEO_LENGTH=3
+CAPTURE_LENGTH=120
+FRAMES=$(( $(($VIDEO_LENGTH*60))*$FPS))
+DELAY=$((1/ $(( $(($FRAMES*60))/$(($CAPTURE_LENGTH*60))))/$FPS ))
+
+# array of directories used
+dirs=(
+    "$BASE_DIR"
+    "$SCREENSHOT_DIR"
+    "$SCREENSHOT_I1"
+    "$SCREENSHOT_I2"
+    "$SCREENSHOT_V1"
+    "$SCREENSHOT_V2"
+    "$VIDEO_COMPILED"
+)
+
+
+# lets not do this as root
+if [[ $EUID -eq 0 ]]; then
+   echo "Dont run as root. This captures the desktop invoked by the logged in user. " 
+   exit 1
+fi
+
+# create all dirs used in script (init)
+function create_dirs(){
+    for d in ${dirs[@]}
+    do
+        if [ ! -d  "$d" ]; then
+            mkdir -p "$d"
+            echo " Created missing directory: $d"
+        fi
+    done
+}
+
+
+# 1-timelapse picture in picture script By Charles Watkins
+function screenshot(){
+    echo  " Press 'q' to quit:"
+    index=1
+    while [ 1 ]; do 
+        tput cub 80
+        echo -n "Frame:" $index  " of "+$FRAMES
+        maim "$SCREENSHOT_DIR"/$(date +%s).png; 
+        read -n1 -r -t "$DELAY"  input
+        echo $input
+        if [[ $FRAMES -eq $index ]]; then 
+            echo "FRAMES DONE";
+            return
+        fi
+        ((index++))
+        if [[ ! -z "$input" ]]; then 
+            if [[ "q" -eq "$input" ]]; then 
+                echo "Quit";
+               return
+           fi
+       fi
+    done
+}
+
+# 2-This script splits a screenshot that spans 2 monitors
+function split_stills(){
+    convert *.png -gravity West -crop 50%x100%+0+0 "$SCREENSHOT_I1"/left%04d.png
+    convert *.png -gravity East -crop 50%x100%+0+0 "$SCREENSHOT_I2"/right%04d.png
+}
+
+# 3-this script converts a set of left and right still images into a set of left and right videos
+function make_videos(){
+    ffmpeg -r 15 -f image2 -s 1920x1080 -start_number 1 -i "$SCREENSHOT_I1"/left%04d.png  -vframes 1000 -vcodec libx264 -crf 25  -pix_fmt yuv420p "$SCREENSHOT_V1"/left.mp4
+    ffmpeg -r 15 -f image2 -s 1920x1080 -start_number 1 -i "$SCREENSHOT_I2"/right%04d.png -vframes 1000 -vcodec libx264 -crf 25  -pix_fmt yuv420p "$SCREENSHOT_V2"/right.mp4
+}
+
+# 4-this script takes 2 videos and creates an overlayed picture in picture video
+function make_pip(){
+    ffmpeg -i "$SCREENSHOT_V1"/left.mp4 -i ./RIGHT/right.mp4 -filter_complex "[0]scale=iw/5:ih/5 [pip]; [1][pip] overlay=main_w-overlay_w-10:main_h-overlay_h-10" "$VIDEO_COMPILED"/PIP_video-$(date +%s).mp4
+}
+
+# 5-install dependencies (fedora)
+function install_deps(){
+    dnf install gcc make xclip -y
+    
+    cd "$BASE_DIR"
+    git clone https://github.com/naelstrof/slop.git
+    cd slop
+    cmake -DCMAKE_INSTALL_PREFIX="/usr" ./
+    make && sudo make install
+    cd ..
+    git clone https://github.com/naelstrof/maim.git
+    cd maim
+    cmake -DCMAKE_INSTALL_PREFIX="/usr" ./
+    make && sudo make install
+    cd ..
+}
+
+
+
+
+
+function display_config(){
+    echo "---------------"
+    echo "Delay       : " $DELAY
+    echo "Capture Time: " $CAPTURE_LENGTH
+    echo "Video Length: " $VIDEO_LENGTH
+    echo "FPS         : " $FPS
+    echo "FRAMES      : " $FRAMES
+}
+            
+
+function choose_option(){
+    deps=(
+    "xclip"
+    "maim"
+    "slop"
+    "tput"
+    )
+    missing_deps=[]
+    for dep in ${deps[@]};
+    do
+        $(which "$dep">/dev/null 2>&1)
+        res=$?
+        if [[ $res -eq 1 ]]; then
+            missing_deps+=($dep)
+        fi
+    done
+    show_config=0
+    while [ ! $finished ]
+    do
+   
+        FRAMES=$(( $(($VIDEO_LENGTH*60))*$FPS))
+        CL=$(($CAPTURE_LENGTH*60))
+        CFPS=$(bc -l <<< "$FRAMES/$CL")
+        DELAY=$(bc -l <<< "1 / $CFPS " )
+
+   
+        if [[ $show_config -eq 1 ]]; then
+            display_config
+            show_config=0
+        fi
+
+   
+        echo    "What do you want to do:"
+        echo    "  V. Configure Video Play Length"
+        echo    "  C. Configure Capture Time"
+        echo    "  F. Configure FPS"
+        echo    "  D. Display Configuration"
+        echo    "  1. Capture Stills"
+        echo    "  2. Split Stills"
+        echo    "  3. Stills to Videos"
+        echo    "  4. Compile PIP Video"
+        echo -n "  5. Setup Enviorment ("
+        for dep in ${deps[@]}
+        do
+            missing=False
+            for missing_dep in ${missing_deps[@]}
+            do
+               if [[ "$dep" == "$missing_dep" ]]; then
+                missing=True
+               fi 
+            done
+            if [[ $missing == True ]] ; then
+             echo  -n -e "\033[31m $dep \033[0m"
+            else
+             echo -n -e "\033[32m  $dep \033[0m"
+            fi 
+        done
+        echo ") "
+        read  -p "Enter Option [1-5]:"  option
+
+        case $option in
+            V) read -p "Enter Video Playback Length in minutes:"  len
+               VIDEO_LENGTH=$len 
+               show_config=1
+              ;;
+            C) read -p "Enter Capture Length in minutes:"  len
+               echo $len
+               CAPTURE_LENGTH=$len
+               show_config=1
+              ;;
+            F) read -p 'Enter FPS:' len
+               FPS=$len
+               show_config=1
+               ;;
+            D) display_config ;;
+            1) screenshot ;;
+            2) split_stills ;;
+            3) make_videos ;; 
+            4) make_pip ;;
+            5) install_deps ;;
+            *) echo "invalid option..." ;;
+        esac
+    done
+}
+
+
+# start of script execution
+create_dirs
+choose_option
+
+
+
